@@ -48,7 +48,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     }
 }
 
-void wifi_shutdown(void) {
+void wl_wifi_shutdown(void) {
     ESP_LOGI(TAG, "WiFi deinit starting...");
     // Stop WiFi
     ESP_ERROR_CHECK(esp_wifi_stop());
@@ -71,7 +71,7 @@ void wifi_shutdown(void) {
 }
 
 /* Initialize WiFi station */
-void wifi_sta_init(const char *ssid, const char *password)
+void wl_wifi_sta_init(const char *ssid, const char *password)
 {
     ESP_LOGI(TAG, "WiFi station mode initialization starting...");
     wifi_event_group = xEventGroupCreate();
@@ -121,7 +121,7 @@ void wifi_sta_init(const char *ssid, const char *password)
 }
 
 /* WiFi should start before using ESPNOW */
-void wifi_espnow_init(void)
+void wl_wifi_espnow_init(void)
 {
     ESP_LOGI(TAG, "WiFi ESPNOW mode initialization starting...");
     ESP_ERROR_CHECK(esp_netif_init());
