@@ -71,7 +71,7 @@ void wl_wifi_shutdown(void) {
 }
 
 /* Initialize WiFi station */
-void wl_wifi_sta_init(const char *ssid, const char *password)
+void wl_wifi_init(const char *ssid, const char *password)
 {
     ESP_LOGI(TAG, "WiFi station mode initialization starting...");
     wifi_event_group = xEventGroupCreate();
@@ -108,7 +108,7 @@ void wl_wifi_sta_init(const char *ssid, const char *password)
     strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
 
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(ESPNOW_WIFI_MODE));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
@@ -118,27 +118,4 @@ void wl_wifi_sta_init(const char *ssid, const char *password)
     ESP_LOGI(TAG, "Waiting for WiFi connection...");
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi connected!");
-}
-
-/* WiFi should start before using ESPNOW */
-void wl_wifi_espnow_init(void)
-{
-    ESP_LOGI(TAG, "WiFi ESPNOW mode initialization starting...");
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg) );
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(ESPNOW_WIFI_MODE));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    // Commented out. When switching from station mode to ESPNOW mode, the channel is preserved.
-    // The AP or router might have capability to detect channel with less traffic.
-    // Therefore would be benificial to ESPNOW mode to stick to the same channel.
-    // ESP_ERROR_CHECK(esp_wifi_set_channel(CONFIG_ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
-
-#if CONFIG_ESPNOW_ENABLE_LONG_RANGE
-    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESPNOW_WIFI_IF, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
-#endif
-
-    ESP_LOGI(TAG, "WiFi ESPNOW initialization finished");
 }
