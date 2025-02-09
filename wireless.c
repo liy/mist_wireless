@@ -71,51 +71,140 @@ void wl_wifi_shutdown(void) {
 }
 
 /* Initialize WiFi station */
-void wl_wifi_init(const char *ssid, const char *password)
+void wl_wifi_init()
 {
     ESP_LOGI(TAG, "WiFi station mode initialization starting...");
-    wifi_event_group = xEventGroupCreate();
+    // wifi_event_group = xEventGroupCreate();
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    start();
 
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "",
-            .password = "",
-            .threshold = {
-                .authmode = WIFI_AUTH_WPA2_PSK,
-            },
-        },
-    };
-    // Copy the SSID and password to the wifi_config structure
-    strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
-    strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    // ESP_ERROR_CHECK(esp_netif_init());
+    // ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(ESPNOW_WIFI_MODE));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    // // Try AP provisioning, if wifi provisioning is not done
+    // char *ssid = NULL;
+    // char *password = NULL;
+    // wl_try_ap_provisioning(&ssid, &password);
 
-    ESP_LOGI(TAG, "WiFi initialization finished");
 
-    // Wait for WiFi connection
-    ESP_LOGI(TAG, "Waiting for WiFi connection...");
-    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
-    ESP_LOGI(TAG, "WiFi connected!");
+
+
+
+
+
+
+    // // Switch back to default sta mode
+    // esp_netif_create_default_wifi_sta();
+
+    // wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    // ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+    //                                                     ESP_EVENT_ANY_ID,
+    //                                                     &wifi_event_handler,
+    //                                                     NULL,
+    //                                                     &));
+    // ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+    //                                                     IP_EVENT_STA_GOT_IP,
+    //                                                     &wifi_event_handler,
+    //                                                     NULL,
+    //                                                     &instance_got_ip));
+
+    // wifi_config_t wifi_config = {
+    //     .sta = {
+    //         .ssid = "",
+    //         .password = "",
+    //         .threshold = {
+    //             .authmode = WIFI_AUTH_WPA2_PSK,
+    //         },
+    //     },
+    // };
+    // // Copy the SSID and password to the wifi_config structure
+    // strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    // strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+    // if (ssid && password) {
+    //     printf("Provisioned SSID: %s\n", ssid);
+    //     printf("Provisioned Password: %s\n", password);
+
+    //     // Free the allocated memory
+    //     free(ssid);
+    //     free(password);
+    // }
+
+    // ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+    // // ESP32C6 seems like can use WIFI and ESPNOW at the same time.
+    // // So I just set the mode to ESPNOW_WIFI_MODE
+    // ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    // ESP_LOGI(TAG, "Set to ESPNOW_WIFI_MODE");
+    // ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    // ESP_ERROR_CHECK(esp_wifi_start());
+
+    // // Wait for WiFi connection
+    // ESP_LOGI(TAG, "Waiting for WiFi connection...");
+    // xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    // ESP_LOGI(TAG, "WiFi connected!");
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // esp_netif_create_default_wifi_sta();
+
+    // wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    // ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    // ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+    //                                                     ESP_EVENT_ANY_ID,
+    //                                                     &wifi_event_handler,
+    //                                                     NULL,
+    //                                                     &instance_any_id));
+    // ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+    //                                                     IP_EVENT_STA_GOT_IP,
+    //                                                     &wifi_event_handler,
+    //                                                     NULL,
+    //                                                     &instance_got_ip));
+
+    // wifi_config_t wifi_config = {
+    //     .sta = {
+    //         .ssid = "",
+    //         .password = "",
+    //         .threshold = {
+    //             .authmode = WIFI_AUTH_WPA2_PSK,
+    //         },
+    //     },
+    // };
+    // // Copy the SSID and password to the wifi_config structure
+    // strncpy((char*)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    // strncpy((char*)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
+
+    // ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
+    // // ESP32C6 seems like can use WIFI and ESPNOW at the same time.
+    // // So I just set the mode to ESPNOW_WIFI_MODE
+    // ESP_ERROR_CHECK(esp_wifi_set_mode(ESPNOW_WIFI_MODE));
+    // ESP_LOGI(TAG, "Set to ESPNOW_WIFI_MODE");
+    // ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    // ESP_ERROR_CHECK(esp_wifi_start());
+
+    // ESP_LOGI(TAG, "WiFi initialization finished");
+
+    // // Wait for WiFi connection
+    // ESP_LOGI(TAG, "Waiting for WiFi connection...");
+    // xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    // ESP_LOGI(TAG, "WiFi connected!");
 }

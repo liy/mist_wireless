@@ -1,5 +1,7 @@
 #pragma once
 
-void wl_wifi_init(const char *ssid, const char *password);
+#include "ap_provision.h"
+
+void wl_wifi_init(void);
 
 void wl_wifi_shutdown(void);
