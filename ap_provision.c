@@ -21,87 +21,27 @@
 #include "esp_http_server.h"
 #include "dns_server.h" 
 
+#define MAX_RETRIES    5
+
 extern const char root_start[] asm("_binary_root_html_start");
 extern const char root_end[] asm("_binary_root_html_end");
 
-extern const char error_start[] asm("_binary_error_html_start");
-extern const char error_end[] asm("_binary_error_html_end");
-
 static const char *TAG = "Prvin";
 
+static EventGroupHandle_t wifi_event_group;
+static esp_event_handler_instance_t instance_any_id;
+static esp_event_handler_instance_t instance_got_ip;
+
+const int PRO_WIFI_CONNECTED_BIT = BIT0;
+static int retry_count = 0;
+
+static bool wifi_connected = false;
 
 // Task handle to notify when slave has sent over its the address
-static TaskHandle_t s_notify = NULL;
+static TaskHandle_t s_connection_trial_notify = NULL;
 
 static char *s_ssid = NULL;
 static char *s_password = NULL;
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
-{
-    if (event_id == WIFI_EVENT_AP_STACONNECTED) {
-        wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
-        ESP_LOGI(TAG, "station " MACSTR " join, AID=%d",
-                 MAC2STR(event->mac), event->aid);
-    } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-        wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
-        ESP_LOGI(TAG, "station " MACSTR " leave, AID=%d, reason=%d",
-                 MAC2STR(event->mac), event->aid, event->reason);
-    }
-}
-
-static void wifi_init_softap(void)
-{
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-
-    wifi_config_t wifi_config = {
-        .ap = {
-            .ssid = "MIST",
-            .password = "",
-            .authmode = WIFI_AUTH_OPEN,   // No encryption
-            .max_connection = 4,
-            .channel = 1
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_MODE_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    esp_netif_ip_info_t ip_info;
-    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"), &ip_info);
-
-    char ip_addr[16];
-    inet_ntoa_r(ip_info.ip.addr, ip_addr, 16);
-    ESP_LOGI(TAG, "Set up softAP with IP: %s", ip_addr);
-
-    ESP_LOGI(TAG, "wifi_init_softap finished");
-}
-
-static void dhcp_set_captiveportal_url(void) {
-    // get the IP of the access point to redirect to
-    esp_netif_ip_info_t ip_info;
-    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"), &ip_info);
-
-    char ip_addr[16];
-    inet_ntoa_r(ip_info.ip.addr, ip_addr, 16);
-    ESP_LOGI(TAG, "Set up softAP with IP: %s", ip_addr);
-
-    // turn the IP into a URI
-    char* captiveportal_uri = (char*) malloc(32 * sizeof(char));
-    assert(captiveportal_uri && "Failed to allocate captiveportal_uri");
-    strcpy(captiveportal_uri, "http://");
-    strcat(captiveportal_uri, ip_addr);
-
-    // get a handle to configure DHCP with
-    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-
-    // set the DHCP option 114
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_stop(netif));
-    ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, captiveportal_uri, strlen(captiveportal_uri)));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(netif));
-}
 
 // HTTP GET Handler
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -133,14 +73,11 @@ static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     char *password_start = strstr(content, "&password=") + 10;
     int ssid_len = password_start - ssid_start - 10;
     int password_len = content_len - (password_start - content);
-
     // Allocate memory for SSID and password
     s_ssid = (char *)malloc(ssid_len + 1);
     s_password = (char *)malloc(password_len + 1);
-    
     // Parse the POST data (form data) - in this case, ssid and password
     sscanf(content, "ssid=%49[^&]&password=%49s", s_ssid, s_password);
-
     // Null-terminate the strings
     s_ssid[ssid_len] = '\0';
     s_password[password_len] = '\0';
@@ -148,50 +85,41 @@ static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     // Log the parsed ssid and password
     ESP_LOGI(TAG, "SSID: %s, Password: %s", s_ssid, s_password);
 
-    // // Send a response to the client
-    // const char *response = "<html><body><h1>Form Submitted</h1><p>SSID: %s</p><p>Password: %s</p></body></html>";
-    // httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+    // Update the Wi-Fi configuration
+    wifi_config_t sta_config;
+    esp_wifi_get_config(ESP_IF_WIFI_STA, &sta_config);
+    strncpy((char *)sta_config.sta.ssid, s_ssid, sizeof(sta_config.sta.ssid) - 1);
+    strncpy((char *)sta_config.sta.password, s_password, sizeof(sta_config.sta.password) - 1);
 
-    // Redirect to the "/" root directory
-    // httpd_resp_set_hdr(req, "Location", "/success");
-    // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
-    httpd_resp_send(req, "Success, your can start pairing your MIST sensor now...", HTTPD_RESP_USE_STRLEN);
+    // Retry the WiFi connection with the new credentials
+    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+    ESP_ERROR_CHECK(esp_wifi_connect());
 
-    // Notify that provisioning is done
-    xTaskNotifyGive(s_notify);
+    // Store the handle for the connection trial
+    s_connection_trial_notify = xTaskGetCurrentTaskHandle();
+    // Wait for maximum 10 seconds for the connection to be established
+    for(uint i = 0; i < 10; i++) {
+        if(ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) == 1) {
+            ESP_LOGI(TAG, "Exiting loop as signaled");
+            break;
+        }
+    }
+
+    if(wifi_connected) {
+        httpd_resp_send(req, "WiFi connection succeeds! This page is going automatically close in a few seconds...", HTTPD_RESP_USE_STRLEN);
+    } else {
+        httpd_resp_set_status(req, "302 Temporary Redirect");
+        // Redirect to the "/" root directory
+        // TODO: include some information in the query or header to indicate the failure
+        httpd_resp_set_hdr(req, "Location", "/");
+        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
+        httpd_resp_send(req, "Wifi connection failed, please retry", HTTPD_RESP_USE_STRLEN);
+    }
+
 
     return ESP_OK;
 }
-
-static esp_err_t error_get_handler(httpd_req_t *req)
-{
-    const uint32_t error_len = error_end - error_start;
-
-    ESP_LOGI(TAG, "Serve error");
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, error_start, error_len);
-
-    return ESP_OK;
-}
-
-static const httpd_uri_t root = {
-    .uri = "/",
-    .method = HTTP_GET,
-    .handler = root_get_handler
-};
-
-static httpd_uri_t submit_uri = {
-    .uri       = "/submit_provisioning",
-    .method    = HTTP_POST,
-    .handler   = submit_provisioning_post_handler,
-};
-
-static const httpd_uri_t error_uri = {
-    .uri = "/error",
-    .method = HTTP_GET,
-    .handler = error_get_handler
-};
-
 
 // HTTP Error (404) Handler - Redirects all requests to the root page
 esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
@@ -207,6 +135,18 @@ esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
     return ESP_OK;
 }
 
+static const httpd_uri_t root = {
+    .uri = "/",
+    .method = HTTP_GET,
+    .handler = root_get_handler
+};
+
+static httpd_uri_t submit_uri = {
+    .uri       = "/submit_provisioning",
+    .method    = HTTP_POST,
+    .handler   = submit_provisioning_post_handler,
+};
+
 static httpd_handle_t start_webserver(void)
 {
     httpd_handle_t server = NULL;
@@ -221,439 +161,301 @@ static httpd_handle_t start_webserver(void)
         ESP_LOGI(TAG, "Registering URI handlers");
         httpd_register_uri_handler(server, &root);
         httpd_register_uri_handler(server, &submit_uri);
-        httpd_register_uri_handler(server, &error_uri);
         httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
     }
 
     return server;
 }
 
+static void dhcp_set_captiveportal_url(void) 
+{
+    // get the IP of the access point to redirect to
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"), &ip_info);
+
+    char ip_addr[16];
+    inet_ntoa_r(ip_info.ip.addr, ip_addr, 16);
+    ESP_LOGI(TAG, "Set up softAP with IP: %s", ip_addr);
+
+    // turn the IP into a URI
+    char* captiveportal_uri = (char*) malloc(32 * sizeof(char));
+    assert(captiveportal_uri && "Failed to allocate captiveportal_uri");
+    strcpy(captiveportal_uri, "http://");
+    strcat(captiveportal_uri, ip_addr);
+
+    // get a handle to configure DHCP with
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    // set the DHCP option 114
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_stop(netif));
+    ESP_ERROR_CHECK(esp_netif_dhcps_option(netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, captiveportal_uri, strlen(captiveportal_uri)));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(netif));
+}
 
-// static bool wl_get_wifi_credential() {
-
-
-//     // nvs_iterator_t it = NULL;
-//     // esp_err_t err = nvs_entry_find("nvs", NULL, NVS_TYPE_ANY, &it);
-//     // while(err == ESP_OK) {
-//     //     nvs_entry_info_t info;
-//     //     nvs_entry_info(it, &info); // Can omit error check if parameters are guaranteed to be non-NULL
-//     //     printf("key '%s', type '%d', namespace '%s' \n", info.key, info.type, info.namespace_name);
-//     //     err = nvs_entry_next(&it);
-//     // }
-//     // nvs_release_iterator(it);
-
-
-
-
-//     nvs_handle_t nvs;
-//     esp_err_t err = nvs_open("nvs", NVS_READONLY, &nvs);
-//     printf("NVS open status: %s\n", esp_err_to_name(err));
-//     if (err == ESP_OK) {
-//         size_t ssid_len = 0;
-//         size_t password_len = 0;
-
-//         // Get the length of the stored SSID and password
-//         err = nvs_get_str(nvs, "sta.ssid", NULL, &ssid_len);
-//         if (err == ESP_OK) {
-//             err = nvs_get_str(nvs, "sta.pswd", NULL, &password_len);
-//         } else {
-//             // Does not have stored Wi-Fi credentials
-//             return false;
-//         }
-
-//         if (err == ESP_OK) {
-//             // Allocate memory for SSID and password
-//             s_ssid = (char *)malloc(ssid_len);
-//             s_password = (char *)malloc(password_len);
-
-//             // Retrieve the stored SSID and password
-//             err = nvs_get_str(nvs, "ssid", s_ssid, &ssid_len);
-//             if (err == ESP_OK) {
-//                 err = nvs_get_str(nvs, "password", s_password, &password_len);
-//             }
-
-//             if (err == ESP_OK) {
-//                 // Wi-Fi credentials are stored
-//                 printf("Stored Wi-Fi SSID: %s\n", (char *)s_ssid);
-//                 printf("Stored Wi-Fi Password: %s\n", (char *)s_password);
-//                 nvs_close(nvs);
-//                 return true;
-//             } else {
-//                 // Free allocated memory if retrieval failed
-//                 free(s_ssid);
-//                 free(s_password);
-//                 s_ssid = NULL;
-//                 s_password = NULL;
-//             }
-//         }
-//         nvs_close(nvs);
-
-//         return true;
-//     } else {
-//         // NVS initialization failed
-//         printf("NVS initialization failed.\n");
-//         return false;
-//     }
-// }
-
-// // Function to read Wi-Fi credentials from NVS
-// esp_err_t read_wifi_credentials(char *ssid, char *password) {
-//     wifi_config_t wifi_config;
-//     esp_err_t err = esp_wifi_get_config(WIFI_IF_STA, &wifi_config);
-//     if (err != ESP_OK) {
-//         ESP_LOGE(TAG, "Failed to get Wi-Fi configuration");
-//         return err;
-//     }
-
-//     // Copy SSID and password
-//     strncpy(ssid, (char *)wifi_config.sta.ssid, 32);
-//     strncpy(password, (char *)wifi_config.sta.password, 64);
-
-//     return ESP_OK;
-// }
-
-// void wl_try_ap_provisioning(char **out_ssid, char **out_password)
-// {
-//     /*
-//         Turn of warnings from HTTP server as redirecting traffic will yield
-//         lots of invalid requests
-//     */
-//     esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
-//     esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
-//     esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
-
-
-
-
-
-
-
-
-
-
-
-
-//     // Initialize NVS
-//     esp_err_t ret = nvs_flash_init();
-//     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-//         ESP_ERROR_CHECK(nvs_flash_erase());
-//         ret = nvs_flash_init();
-//     }
-//     ESP_ERROR_CHECK(ret);
-
-//     // Initialize Wi-Fi
-//     ESP_ERROR_CHECK(esp_netif_init());
-//     ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-//     esp_netif_create_default_wifi_sta();
-    
-//     char ssid[32] = {0};
-//     char password[64] = {0};
-//     // Read Wi-Fi credentials from NVS
-//     esp_err_t err = read_wifi_credentials(ssid, password);
-//     if (err != ESP_OK || strlen(ssid) == 0 || strlen(password) == 0) {
-//         ESP_LOGI(TAG, "No credentials found, starting provisioning...");
-        
-
-
-
-//         // Store the handle of the current handshake task
-//         s_notify = xTaskGetCurrentTaskHandle();
-
-
-//         // Initialize Wi-Fi including netif with default config
-//         esp_netif_create_default_wifi_ap();
-
-//         // Initialise ESP32 in SoftAP mode
-//         wifi_init_softap();
-
-//         // Configure DNS-based captive portal, if configured
-//         dhcp_set_captiveportal_url();
-
-//         // Start the server for the first time
-//         httpd_handle_t http_server = start_webserver();
-
-//         // Start the DNS server that will redirect all queries to the softAP IP
-//         dns_server_config_t config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
-//         dns_server_handle_t dns_server = start_dns_server(&config);
-
-//         while(true) {
-//             if(ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) == 1) {
-//                 ESP_LOGI(TAG, "Exiting loop as signaled");
-//                 break;
-//             }
-//         }
-
-//         ESP_LOGI(TAG, "Stopping DSN + HTTP server");
-//         httpd_stop(http_server);
-//         stop_dns_server(dns_server);
-
-//         // Assign the pointers to the output parameters
-//         *out_ssid = s_ssid;
-//         *out_password = s_password;
-
-//         // Clean up Wi-Fi AP handler
-//         ESP_ERROR_CHECK(esp_wifi_stop());
-//         ESP_ERROR_CHECK(esp_wifi_deinit());
-
-
-
-//         return;
-//     }
-//     ESP_LOGI(TAG, "Wi-Fi credentials found, SSID: %s, Password: %s", ssid, password);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-//     // // Initialize networking stack
-//     // ESP_ERROR_CHECK(esp_netif_init());
-
-//     // // Initialize NVS needed by Wi-Fi
-//     // ESP_ERROR_CHECK(nvs_flash_init());
-
-//     // if (!wl_get_wifi_credential()) {
-//     //     // Store the handle of the current handshake task
-//     //     s_notify = xTaskGetCurrentTaskHandle();
-
-//     //     // // Create default event loop needed by the  main app
-//     //     // ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-//     //     // Initialize Wi-Fi including netif with default config
-//     //     esp_netif_create_default_wifi_ap();
-
-//     //     // Initialise ESP32 in SoftAP mode
-//     //     wifi_init_softap();
-
-//     //     // Configure DNS-based captive portal, if configured
-//     //     dhcp_set_captiveportal_url();
-
-//     //     // Start the server for the first time
-//     //     httpd_handle_t http_server = start_webserver();
-
-//     //     // Start the DNS server that will redirect all queries to the softAP IP
-//     //     dns_server_config_t config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
-//     //     dns_server_handle_t dns_server = start_dns_server(&config);
-
-//     //     while(true) {
-//     //         if(ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) == 1) {
-//     //             ESP_LOGI(TAG, "Exiting loop as signaled");
-//     //             break;
-//     //         }
-//     //     }
-
-//     //     ESP_LOGI(TAG, "Stopping DSN + HTTP server");
-//     //     httpd_stop(http_server);
-//     //     stop_dns_server(dns_server);
-
-//     //     // Assign the pointers to the output parameters
-//     //     *out_ssid = s_ssid;
-//     //     *out_password = s_password;
-
-//     //     // Clean up Wi-Fi AP handler
-//     //     ESP_ERROR_CHECK(esp_wifi_stop());
-//     //     ESP_ERROR_CHECK(esp_wifi_deinit());
-//     // }
-
-// }
-
-
-
-
-
-#define MAX_RETRIES    5
-
-static EventGroupHandle_t wifi_event_group;
-static esp_event_handler_instance_t instance_any_id;
-static esp_event_handler_instance_t instance_got_ip;
-
-const int PRO_WIFI_CONNECTED_BIT = BIT0;
-static int retry_count = 0;
-
-static bool wifi_connected = false;
-static bool s_is_provisioned = false;
 /**
  * @brief Event handler for Wi-Fi / IP events
  */
-static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
 {
-    if (event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "Wi-Fi STA Start");
-        esp_wifi_connect();
-    } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (retry_count < MAX_RETRIES) {
-            ESP_ERROR_CHECK(esp_wifi_connect());
-            retry_count++;
-            ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", retry_count, MAX_RETRIES);
-        } else {
-            ESP_LOGE(TAG, "Failed to connect to WiFi");
-            xEventGroupClearBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
-        }
-    } else if (event_id == IP_EVENT_STA_GOT_IP) {
-        wifi_connected = true;
-        retry_count = 0;
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
-
-        wifi_config_t wifi_config;
-        esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_config);
-
-        xEventGroupSetBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
-    } else {
-        ESP_LOGI(TAG, "Unknown event: %d", event_id);
-        xEventGroupSetBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
+    switch (event_id) {
+        case WIFI_EVENT_STA_DISCONNECTED:
+            ESP_LOGI("WiFi Event", "Station disconnected from AP");
+            if (retry_count < MAX_RETRIES) {
+                esp_wifi_connect();
+                retry_count++;
+                ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", retry_count, MAX_RETRIES);
+            } else {
+                xTaskNotifyGive(s_connection_trial_notify);
+                ESP_LOGE(TAG, "Failed to connect to WiFi");
+                xEventGroupClearBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
+            }
+            break;
+        case WIFI_EVENT_STA_START:
+            ESP_LOGW("WiFi Event", "Station start");
+            esp_wifi_connect();
+            break;
+        case WIFI_EVENT_WIFI_READY:
+            ESP_LOGW("WiFi Event", "Wi-Fi ready");
+            break;
+        case WIFI_EVENT_SCAN_DONE:
+            ESP_LOGW("WiFi Event", "Finished scanning AP");
+            break;
+        case WIFI_EVENT_STA_STOP:
+            ESP_LOGW("WiFi Event", "Station stop");
+            break;
+        case WIFI_EVENT_STA_CONNECTED:
+            ESP_LOGW("WiFi Event", "Station connected to AP");
+            break;
+        case WIFI_EVENT_STA_AUTHMODE_CHANGE:
+            ESP_LOGW("WiFi Event", "The auth mode of AP connected by device's station changed");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_SUCCESS:
+            ESP_LOGW("WiFi Event", "Station WPS succeeds in enrollee mode");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_FAILED:
+            ESP_LOGW("WiFi Event", "Station WPS fails in enrollee mode");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_TIMEOUT:
+            ESP_LOGW("WiFi Event", "Station WPS timeout in enrollee mode");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_PIN:
+            ESP_LOGW("WiFi Event", "Station WPS pin code in enrollee mode");
+            break;
+        case WIFI_EVENT_STA_WPS_ER_PBC_OVERLAP:
+            ESP_LOGW("WiFi Event", "Station WPS overlap in enrollee mode");
+            break;
+        case WIFI_EVENT_AP_START:
+            ESP_LOGW("WiFi Event", "Soft-AP start");
+            break;
+        case WIFI_EVENT_AP_STOP:
+            ESP_LOGW("WiFi Event", "Soft-AP stop");
+            break;
+        case WIFI_EVENT_AP_STACONNECTED:
+            ESP_LOGW("WiFi Event", "A station connected to Soft-AP");
+            break;
+        case WIFI_EVENT_AP_STADISCONNECTED:
+            ESP_LOGW("WiFi Event", "A station disconnected from Soft-AP");
+            break;
+        case WIFI_EVENT_AP_PROBEREQRECVED:
+            ESP_LOGW("WiFi Event", "Receive probe request packet in soft-AP interface");
+            break;
+        case WIFI_EVENT_FTM_REPORT:
+            ESP_LOGW("WiFi Event", "Receive report of FTM procedure");
+            break;
+        case WIFI_EVENT_STA_BSS_RSSI_LOW:
+            ESP_LOGW("WiFi Event", "AP's RSSI crossed configured threshold");
+            break;
+        case WIFI_EVENT_ACTION_TX_STATUS:
+            ESP_LOGW("WiFi Event", "Status indication of Action Tx operation");
+            break;
+        case WIFI_EVENT_ROC_DONE:
+            ESP_LOGW("WiFi Event", "Remain-on-Channel operation complete");
+            break;
+        case WIFI_EVENT_STA_BEACON_TIMEOUT:
+            ESP_LOGW("WiFi Event", "Station beacon timeout");
+            break;
+        case WIFI_EVENT_CONNECTIONLESS_MODULE_WAKE_INTERVAL_START:
+            ESP_LOGW("WiFi Event", "Connectionless module wake interval start");
+            break;
+        case WIFI_EVENT_AP_WPS_RG_SUCCESS:
+            ESP_LOGW("WiFi Event", "Soft-AP wps succeeds in registrar mode");
+            break;
+        case WIFI_EVENT_AP_WPS_RG_FAILED:
+            ESP_LOGW("WiFi Event", "Soft-AP wps fails in registrar mode");
+            break;
+        case WIFI_EVENT_AP_WPS_RG_TIMEOUT:
+            ESP_LOGW("WiFi Event", "Soft-AP wps timeout in registrar mode");
+            break;
+        case WIFI_EVENT_AP_WPS_RG_PIN:
+            ESP_LOGW("WiFi Event", "Soft-AP wps pin code in registrar mode");
+            break;
+        case WIFI_EVENT_AP_WPS_RG_PBC_OVERLAP:
+            ESP_LOGW("WiFi Event", "Soft-AP wps overlap in registrar mode");
+            break;
+        case WIFI_EVENT_ITWT_SETUP:
+            ESP_LOGW("WiFi Event", "iTWT setup");
+            break;
+        case WIFI_EVENT_ITWT_TEARDOWN:
+            ESP_LOGW("WiFi Event", "iTWT teardown");
+            break;
+        case WIFI_EVENT_ITWT_PROBE:
+            ESP_LOGW("WiFi Event", "iTWT probe");
+            break;
+        case WIFI_EVENT_ITWT_SUSPEND:
+            ESP_LOGW("WiFi Event", "iTWT suspend");
+            break;
+        case WIFI_EVENT_TWT_WAKEUP:
+            ESP_LOGW("WiFi Event", "TWT wakeup");
+            break;
+        case WIFI_EVENT_BTWT_SETUP:
+            ESP_LOGW("WiFi Event", "bTWT setup");
+            break;
+        case WIFI_EVENT_BTWT_TEARDOWN:
+            ESP_LOGW("WiFi Event", "bTWT teardown");
+            break;
+        case WIFI_EVENT_NAN_STARTED:
+            ESP_LOGW("WiFi Event", "NAN Discovery has started");
+            break;
+        case WIFI_EVENT_NAN_STOPPED:
+            ESP_LOGW("WiFi Event", "NAN Discovery has stopped");
+            break;
+        case WIFI_EVENT_NAN_SVC_MATCH:
+            ESP_LOGW("WiFi Event", "NAN Service Discovery match found");
+            break;
+        case WIFI_EVENT_NAN_REPLIED:
+            ESP_LOGW("WiFi Event", "Replied to a NAN peer with Service Discovery match");
+            break;
+        case WIFI_EVENT_NAN_RECEIVE:
+            ESP_LOGW("WiFi Event", "Received a Follow-up message");
+            break;
+        case WIFI_EVENT_NDP_INDICATION:
+            ESP_LOGW("WiFi Event", "Received NDP Request from a NAN Peer");
+            break;
+        case WIFI_EVENT_NDP_CONFIRM:
+            ESP_LOGW("WiFi Event", "NDP Confirm Indication");
+            break;
+        case WIFI_EVENT_NDP_TERMINATED:
+            ESP_LOGW("WiFi Event", "NAN Datapath terminated indication");
+            break;
+        case WIFI_EVENT_HOME_CHANNEL_CHANGE:
+            ESP_LOGW("WiFi Event", "Wi-Fi home channel change, doesn't occur when scanning");
+            break;
+        case WIFI_EVENT_STA_NEIGHBOR_REP:
+            ESP_LOGW("WiFi Event", "Received Neighbor Report response");
+            break;
+        case WIFI_EVENT_AP_WRONG_PASSWORD:
+            ESP_LOGW("WiFi Event", "A station tried to connect with wrong password");
+            break;
+        case WIFI_EVENT_MAX:
+            ESP_LOGW("WiFi Event", "Invalid Wi-Fi event ID");
+            break;
+        default:
+            ESP_LOGW("WiFi Event", "Unknown event");
+            break;
     }
 }
 
+static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) 
+{
+    switch (event_id) {
+        case IP_EVENT_STA_GOT_IP:
+        // Got IP Address, meaning the device has connected to Wifi successfully
+            wifi_connected = true;
+            retry_count = 0;
+            ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+            ESP_LOGW(TAG, "Got IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
 
-int count = 0;
-void start_wifi_sta() {
-    ESP_LOGI(TAG, "Starting station");
+            wifi_config_t wifi_config;
+            esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_config);
 
-    // Initialize default station as network interface instance
+            xTaskNotifyGive(s_connection_trial_notify);
+            xEventGroupSetBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
+            break;
+        case IP_EVENT_STA_LOST_IP:
+            ESP_LOGW(TAG, "Lost IP Address");
+            xEventGroupClearBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT);
+            break;
+        default:
+            ESP_LOGW(TAG, "Unknown IP event: %d", event_id);
+            break;
+    }
+}
+
+static void wifi_init_apsta(void) 
+{
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, &instance_got_ip));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    wifi_config_t ap_config = {
+        .ap = {
+            .ssid = "MIST",
+            .password = "",
+            .authmode = WIFI_AUTH_OPEN,
+            .max_connection = 4,
+            .channel = 1
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+
+    wifi_config_t sta_config;
+    esp_wifi_get_config(ESP_IF_WIFI_STA, &sta_config);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    ESP_LOGI(TAG, "wifi_init_aptsa finished");
+}
+
+void start_apsta() 
+{
+    wifi_event_group = xEventGroupCreate();
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Initialize both AP and STA interfaces
+    esp_netif_create_default_wifi_ap();
     esp_netif_create_default_wifi_sta();
 
+    // Initialize WiFi with default configuration
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    // Register our custom event handler for Wi-Fi, IP events
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
 
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_FLASH));
-    // Set Wi-Fi mode to STA
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    // wifi_config_t wifi_config = {
-    //     .sta = {
-    //         .ssid = "asdfasdfa.4G",
-    //         .password = "sdfasfads",
-    //         .threshold = {
-    //             .authmode = WIFI_AUTH_WPA2_PSK,
-    //         },
-    //     },
-    // };
-    
-    wifi_config_t wifi_config;
-    esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_config);
-
-    if(s_is_provisioned) {
-        strncpy((char*)wifi_config.sta.ssid, s_ssid, sizeof(wifi_config.sta.ssid) - 1);
-        strncpy((char*)wifi_config.sta.password, s_password, sizeof(wifi_config.sta.password) - 1);
-    }
-    
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    
-
-    while(true) {
-        // Wait for Wi-Fi connection
-        xEventGroupWaitBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
-    }
-}
-
-void start_provisioning() {
-    // Store the handle of the current handshake task
-    s_notify = xTaskGetCurrentTaskHandle();
-
-    // Initialize Wi-Fi including netif with default config
-    esp_netif_create_default_wifi_ap();
-
-    // Initialise ESP32 in SoftAP mode
-    wifi_init_softap();
+    wifi_init_apsta();
 
     // Configure DNS-based captive portal, if configured
     dhcp_set_captiveportal_url();
-
-    // Start the server for the first time
+     // Start the server for the first time
     httpd_handle_t http_server = start_webserver();
-
     // Start the DNS server that will redirect all queries to the softAP IP
     dns_server_config_t config = DNS_SERVER_CONFIG_SINGLE("*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
     dns_server_handle_t dns_server = start_dns_server(&config);
 
-    while(true) {
-        if(ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) == 1) {
-            s_is_provisioned = true;
+    // Wait for WiFi connection
+    ESP_LOGI(TAG, "Waiting for WiFi connection...");
+    xEventGroupWaitBits(wifi_event_group, PRO_WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    ESP_LOGI(TAG, "WiFi connected!");
 
-            ESP_LOGI(TAG, "Exiting provision loop as signaled");
-            break;
-        }
-    }
-
-    ESP_LOGI(TAG, "Stopping DSN + HTTP server");
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    
+    // ESP_LOGI(TAG, "Stopping DSN + HTTP server");
     httpd_stop(http_server);
     stop_dns_server(dns_server);
 
-    // Clean up Wi-Fi AP handler
-    ESP_ERROR_CHECK(esp_wifi_stop());
-    ESP_ERROR_CHECK(esp_wifi_deinit());
+    // Turn off AP, Reset to station mode
+    esp_wifi_stop();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
 }
 
 void start() 
 {
-    wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    
-    // find the stored Wi-Fi credentials 
-    // nvs_iterator_t it = NULL;
-    // esp_err_t err = nvs_entry_find("nvs", NULL, NVS_TYPE_ANY, &it);
-    // while(err == ESP_OK) {
-    //     nvs_entry_info_t info;
-    //     nvs_entry_info(it, &info); // Can omit error check if parameters are guaranteed to be non-NULL
-    //     printf("key '%s', type '%d', namespace '%s' \n", info.key, info.type, info.namespace_name);
-    //     err = nvs_entry_next(&it);
-    // }
-    // nvs_release_iterator(it);
-
 
     
-    wifi_config_t wifi_config;
-    esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_config);
-    ESP_LOGI(TAG, "Stored Wi-Fi SSID: %s", (char *)wifi_config.sta.ssid);
-    ESP_LOGI(TAG, "Stored Wi-Fi Password: %s", (char *)wifi_config.sta.password);
-    if (strlen((char*)wifi_config.sta.ssid) == 0 || strlen((char*)wifi_config.sta.password) == 0) {
-        while(!wifi_connected) {
-            start_provisioning();
-            start_wifi_sta();
-        }
-    } else {
-        start_wifi_sta();
+    start_apsta();
 
-        while(!wifi_connected) {
-            start_provisioning();
-            start_wifi_sta();
-        }
+    while (1) {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
-    
-
-
-    // if station mode wifi connection failed, starts provisioning loop
-    // In the loop:
-    //      1. Starts a softAP
-    //      2. Wait for user to connect to the softAP and provide wifi credentials
-    //      3. Start station mode with the provided credentials
-    //      4. If station mode wifi connection failed, repeat the loop, else exit the loop
-    
 }
