@@ -375,6 +375,9 @@ static void wifi_start_apsta(void)
 {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, &instance_got_ip));
+    // For simplicity reason, although the root node might be just need to be in station mode, I want to leave the this master node to be in APSTA mode.
+    // so it can be easily form the mesh network.
+    // Of course, AP mode will also be used for provisioning.
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     // AP does not require a password
@@ -438,11 +441,6 @@ void wl_wifi_init()
     ESP_LOGI(TAG, "Stopping DSN and HTTP server");
     httpd_stop(http_server);
     stop_dns_server(dns_server);
-
-    // Turn off AP, Reset to station mode
-    esp_wifi_stop();
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
 }
 
 void wl_wifi_shutdown(void) {
@@ -450,6 +448,10 @@ void wl_wifi_shutdown(void) {
     // Stop WiFi
     ESP_ERROR_CHECK(esp_wifi_stop());
     ESP_ERROR_CHECK(esp_wifi_deinit());
+
+    // Start use long range protocols
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_AP, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
 
     // Unregister event handlers
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
