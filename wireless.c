@@ -30,9 +30,6 @@ static int s_retry_count = 0;
 
 static bool wifi_connected = false;
 
-// Task handle to notify when slave has sent over its the address
-static TaskHandle_t s_connection_trial_notify = NULL;
-
 // HTTP GET Handler
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
@@ -86,25 +83,7 @@ static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
     ESP_ERROR_CHECK(esp_wifi_connect());
 
-    // Wait for maximum 10 seconds for the connection to be established
-    for(uint i = 0; i < 10; i++) {
-        if(ulTaskNotifyTake(pdTRUE, 1000 / portTICK_PERIOD_MS) == 1) {
-            ESP_LOGI(TAG, "Exiting loop as signaled");
-            break;
-        }
-    }
-
-    if(wifi_connected) {
-        httpd_resp_send(req, "WiFi connection succeeds! This page is going automatically close in a few seconds...", HTTPD_RESP_USE_STRLEN);
-    } else {
-        httpd_resp_set_status(req, "302 Temporary Redirect");
-        // Redirect to the "/" root directory
-        // TODO: include some information in the query or header to indicate the failure
-        httpd_resp_set_hdr(req, "Location", "/");
-        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
-        httpd_resp_send(req, "Wifi connection failed, please retry", HTTPD_RESP_USE_STRLEN);
-    }
-
+    httpd_resp_send(req, "WiFi connection succeeds! This page is going automatically close in a few seconds...", HTTPD_RESP_USE_STRLEN);
 
     return ESP_OK;
 }
@@ -193,7 +172,6 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
                 s_retry_count++;
                 ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", s_retry_count, MAX_RETRIES);
             } else {
-                xTaskNotifyGive(s_connection_trial_notify);
                 ESP_LOGE(TAG, "Failed to connect to WiFi");
                 xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
             }
@@ -352,11 +330,6 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t eve
             s_retry_count = 0;
             ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
             ESP_LOGI(TAG, "Got IP Address: " IPSTR, IP2STR(&event->ip_info.ip));
-
-            wifi_config_t wifi_config;
-            esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_config);
-
-            xTaskNotifyGive(s_connection_trial_notify);
             xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
             break;
         case IP_EVENT_STA_LOST_IP:
@@ -369,44 +342,17 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t eve
     }
 }
 
-// Start the Wi-Fi in AP + STA mode.
-// AP for provisioning and STA for connecting to the internet(Wifi)
-static void wifi_start_apsta(void) 
-{
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, &instance_got_ip));
-    // For simplicity reason, although the root node might be just need to be in station mode, I want to leave the this master node to be in APSTA mode.
-    // so it can be easily form the mesh network.
-    // Of course, AP mode will also be used for provisioning.
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-
-    // AP does not require a password
-    wifi_config_t ap_config = {
-        .ap = {
-            .ssid = WIFI_AP_SSID,
-            .password = "",
-            .authmode = WIFI_AUTH_OPEN,
-            .max_connection = 4,
-            .channel = 1
-        },
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
-
-    wifi_config_t sta_config;
-    esp_wifi_get_config(ESP_IF_WIFI_STA, &sta_config);
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
-
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "wifi_init_aptsa finished");
-}
-
 // Initialize Wi-Fi into AP + STA mode ready for provisioning if required
 // If provisioning is not required, it will turn off the AP and reset to station mode
 void wl_wifi_init() 
 {
-    // Store the handle for the connection trial
-    s_connection_trial_notify = xTaskGetCurrentTaskHandle();
+    // Turn of warnings from HTTP server as AP provisioning redirecting traffic will yield
+    // lots of invalid requests
+    esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
+    
+    esp_wifi_restore();
     
     wifi_event_group = xEventGroupCreate();
 
@@ -422,7 +368,34 @@ void wl_wifi_init()
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    wifi_start_apsta();
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &ip_event_handler, NULL, &instance_got_ip));
+
+    // For simplicity reason, although the root node might be just need to be in station mode, I want to leave the this master node to be in APSTA mode.
+    // so it can be easily form the mesh network.
+    // Of course, AP mode will also be used for provisioning.
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    // Configure the AP and STA interfaces
+    // AP interface does not require a password
+    wifi_config_t ap_config = {
+        .ap = {
+            .channel = CONFIG_ESPNOW_CHANNEL,
+            .ssid = WIFI_AP_SSID,
+            .password = "",
+            .authmode = WIFI_AUTH_OPEN,
+            .max_connection = 1,
+        },
+    };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
+
+    wifi_config_t sta_config;
+    sta_config.sta.channel = CONFIG_ESPNOW_CHANNEL;
+    esp_wifi_get_config(ESP_IF_WIFI_STA, &sta_config);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_LOGI(TAG, "wifi APSTA starting...");
 
     // Configure DNS-based captive portal, if configured
     dhcp_set_captiveportal_url();
@@ -437,10 +410,27 @@ void wl_wifi_init()
     xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi connected!");
     
-    
     ESP_LOGI(TAG, "Stopping DSN and HTTP server");
     httpd_stop(http_server);
     stop_dns_server(dns_server);
+
+    // Start use long range protocols is set for both AP and STA interfaces
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
+    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_AP, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
+
+    // Check protocol for STA interface
+    uint8_t protocol;
+    ESP_ERROR_CHECK(esp_wifi_get_protocol(ESP_IF_WIFI_STA, &protocol));
+    if (!(protocol & WIFI_PROTOCOL_LR)) {
+        ESP_LOGE(TAG, "Long range protocol is NOT set correctly for STA interface");
+    }
+    // Check protocol for AP interface
+    ESP_ERROR_CHECK(esp_wifi_get_protocol(ESP_IF_WIFI_AP, &protocol));
+    if (!(protocol & WIFI_PROTOCOL_LR)) {
+        ESP_LOGE(TAG, "Long range protocol is NOT set correctly for AP interface");
+    }
+
+    ESP_LOGI(TAG, "WiFi initialized");
 }
 
 void wl_wifi_shutdown(void) {
@@ -448,10 +438,6 @@ void wl_wifi_shutdown(void) {
     // Stop WiFi
     ESP_ERROR_CHECK(esp_wifi_stop());
     ESP_ERROR_CHECK(esp_wifi_deinit());
-
-    // Start use long range protocols
-    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_STA, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
-    ESP_ERROR_CHECK(esp_wifi_set_protocol(ESP_IF_WIFI_AP, WIFI_PROTOCOL_11B|WIFI_PROTOCOL_11G|WIFI_PROTOCOL_11N|WIFI_PROTOCOL_LR));
 
     // Unregister event handlers
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
