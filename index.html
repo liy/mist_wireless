@@ -202,6 +202,7 @@
         </form>
       </div>
     </div>
+    <!-- TODO: needs a good clean up... it is a mess of hacky code -->
     <script>
       // esp32 will give all the AP and STA ssid, so there might be duplicated ssid, just remove them:
       const select = document.querySelector('select[name="ssid"]');
@@ -255,7 +256,7 @@
       });
 
       // Animation for submit button and form fields
-      document.querySelector("form").addEventListener("submit", (e) => {
+      document.querySelector("form").addEventListener("submit", async (e) => {
         e.preventDefault();
 
         const formElements = document.querySelectorAll("input, select");
@@ -265,19 +266,21 @@
 
         // Get initial height for animation
         const initialHeight = formPanel.offsetHeight;
-        // Set fixed height before animation
         formPanel.style.height = `${initialHeight}px`;
 
         // Fade out input and select fields
         formElements.forEach((field) => {
           field.disabled = true;
-          field.style.animation = "fadeOutFields 0.5 ease-out forwards";
+          field.style.animation = "fadeOutFields 0.5s ease-out forwards";
 
-          field.addEventListener("animationend", () => {
-            field.style.display = "none";
-            // Shrink form after elements are hidden
-            formPanel.style.height = "140px"; // Adjust this value based on your needs
-          });
+          field.addEventListener(
+            "animationend",
+            () => {
+              field.style.display = "none";
+              formPanel.style.height = "140px";
+            },
+            { once: true }
+          );
         });
 
         // Change button to connecting state
@@ -290,13 +293,53 @@
         informationText.textContent =
           "Connecting to the network, please wait...";
 
-        // Enable the fields before submitting the form
-        formElements.forEach((field) => {
-          field.style.display = "block";
-          field.disabled = false;
-        });
-        // Manually submit the form after performing actions
-        e.target.submit();
+        try {
+          // Get the form element directly
+          const form = e.target;
+          // Get values directly from select and input elements
+          const ssid = form.querySelector('select[name="ssid"]').value;
+          const password = form.querySelector('input[name="password"]').value;
+          const response = await fetch("/submit_provisioning", {
+            method: "POST",
+            body: "ssid=" + ssid + "&password=" + password,
+          });
+
+          const status = await response.text();
+
+          if (status == "success") {
+            informationText.textContent =
+              "Connection successful! Page will be closed shortly.";
+            submitBtn.textContent = "Connected";
+            submitBtn.style.backgroundColor = "#4caf50"; // Green color
+          } else {
+            informationText.textContent =
+              "Connection failed. Please try again.";
+            submitBtn.textContent = "Connect";
+            submitBtn.disabled = false;
+            submitBtn.classList.remove("connecting");
+
+            // Re-enable form fields
+            formElements.forEach((field) => {
+              field.style.display = "block";
+              field.disabled = false;
+              field.style.animation = "fadeIn 0.5s ease-out forwards";
+            });
+            formPanel.style.height = `${initialHeight}px`;
+          }
+        } catch (error) {
+          informationText.textContent = "Connection failed. Please try again.";
+          submitBtn.textContent = "Retry";
+          submitBtn.disabled = false;
+          submitBtn.classList.remove("connecting");
+
+          // Re-enable form fields
+          formElements.forEach((field) => {
+            field.style.display = "block";
+            field.disabled = false;
+            field.style.animation = "fadeIn 0.5s ease-out forwards";
+          });
+          formPanel.style.height = `${initialHeight}px`;
+        }
       });
     </script>
   </body>

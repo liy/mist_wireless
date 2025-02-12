@@ -146,30 +146,38 @@ static esp_err_t index_get_handler(httpd_req_t *req)
 
 static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "POST request received");
-    char content[100];  // Buffer to store form data
+    // Allocate buffer based on content length
+    char *content = NULL;
     int content_len = req->content_len;
-
-    // Read the POST data from the request
-    if (content_len > 0) {
-        httpd_req_recv(req, content, content_len);
+    
+    if (content_len <= 0 || content_len > 1024) { // Reasonable max size
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    content = malloc(content_len + 1);
+    if (!content) {
+        return ESP_ERR_NO_MEM;
     }
 
-    // Log the received data (for debugging)
-    ESP_LOGI(TAG, "Received data: %s", content);
+    // Read the POST data
+    int received = httpd_req_recv(req, content, content_len);
+    if (received != content_len) {
+        free(content);
+        return ESP_FAIL;
+    }
+    content[content_len] = '\0';
 
-    // Extract lengths of SSID and password
-    char *ssid_start = strstr(content, "ssid=") + 5;
-    char *password_start = strstr(content, "&password=") + 10;
-    int ssid_len = password_start - ssid_start - 10;
-    int password_len = content_len - (password_start - content);
-    // Allocate memory for SSID and password
-    char *ssid = (char *)malloc(ssid_len + 1);
-    char *password = (char *)malloc(password_len + 1);
-    // Parse the POST data (form data) - in this case, ssid and password
-    sscanf(content, "ssid=%49[^&]&password=%49s", ssid, password);
-    // Null-terminate the strings
-    ssid[ssid_len] = '\0';
-    password[password_len] = '\0';
+    // Allocate buffers for SSID and password
+    char ssid[33] = {0};    // Max SSID length + 1
+    char password[65] = {0}; // Max WPA2 password length + 1
+    
+    if (httpd_query_key_value(content, "ssid", ssid, sizeof(ssid)) != ESP_OK ||
+        httpd_query_key_value(content, "password", password, sizeof(password)) != ESP_OK) {
+        free(content);
+        return ESP_FAIL;
+    }
+    
+    free(content);
 
     // Log the parsed ssid and password
     ESP_LOGI(TAG, "SSID: %s, Password: %s", ssid, password);
@@ -179,11 +187,24 @@ static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     esp_wifi_get_config(ESP_IF_WIFI_STA, &sta_config);
     strncpy((char *)sta_config.sta.ssid, ssid, sizeof(sta_config.sta.ssid) - 1);
     strncpy((char *)sta_config.sta.password, password, sizeof(sta_config.sta.password) - 1);
-
     // Retry the WiFi connection with the new credentials
     ESP_ERROR_CHECK(esp_wifi_disconnect());
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
     ESP_ERROR_CHECK(esp_wifi_connect());
+
+    // Block until IP address is obtained, that is when wifi is connected; or when wifi connection fails
+    const TickType_t xTicksToWait = pdMS_TO_TICKS(5000);
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT, false, true, xTicksToWait);
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_status(req, "200 OK");
+    if(wifi_connected) {
+        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
+        httpd_resp_send(req, "success", HTTPD_RESP_USE_STRLEN);
+    } else {
+        // iOS requires content in the response to detect a captive portal, simply redirecting is not sufficient.
+        httpd_resp_send(req, "fail", HTTPD_RESP_USE_STRLEN);
+    }
 
     return ESP_OK;
 }
@@ -273,6 +294,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
                 ESP_LOGI(TAG, "Retrying WiFi connection (%d/%d)", s_retry_count, MAX_RETRIES);
             } else {
                 ESP_LOGE(TAG, "Failed to connect to WiFi");
+                wifi_connected = false;
                 xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
             }
             break;
@@ -425,7 +447,7 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t eve
 {
     switch (event_id) {
         case IP_EVENT_STA_GOT_IP:
-        // Got IP Address, meaning the device has connected to Wifi successfully
+            // Got IP Address, meaning the device has connected to Wifi successfully
             wifi_connected = true;
             s_retry_count = 0;
             ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
