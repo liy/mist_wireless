@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mist</title>
+    <style>
+      /* Reset some default styles */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      /* Set up basic body styling */
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #ffffff; /* Ivory white background */
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        overflow: hidden;
+        animation: fadeInBackground 0.5s ease-out forwards;
+      }
+
+      /* Container for the form */
+      .container {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Form styling */
+      .login-form {
+        background: rgba(255, 255, 255, 0.9); /* Slightly opaque background */
+        padding: 30px;
+        border-radius: 8px;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        width: 90%;
+        max-width: 400px;
+        backdrop-filter: blur(10px); /* Adds a frosted effect */
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        animation: fadeIn 1s ease-out;
+        transition: all 0.5s ease-in-out;
+        /* ...existing code... */
+        height: auto;
+      }
+
+      .information {
+        text-align: left;
+        color: #702f22;
+      }
+
+      /* Style for input fields and select dropdown */
+      .input-group {
+        display: flex;
+        flex-direction: column;
+      }
+
+      select,
+      input {
+        padding: 12px;
+        font-size: 16px;
+        border: 1px solid #ddd;
+        border-radius: 5px;
+        background-color: #f9f9f9;
+        transition: all 0.5s ease;
+        margin-bottom: 15px; /* Adjusted margin for better spacing */
+      }
+
+      select {
+        -webkit-appearance: none; /* Remove default dropdown arrow */
+        -moz-appearance: none;
+        appearance: none;
+        position: relative;
+      }
+
+      select::after {
+        content: "\25BC"; /* Unicode for downward arrow */
+        font-size: 14px;
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+
+      input:focus,
+      select:focus {
+        border-color: #90aaff;
+        outline: none;
+      }
+
+      /* Button styling */
+      .submit-btn {
+        padding: 14px;
+        font-size: 18px;
+        background-color: #ff9a3d; /* Orange color that stands out */
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-weight: bold;
+        margin-top: 10px; /* Adjusted margin for better spacing */
+        width: 100%; /* Full width for better alignment */
+        transition: color 0.3s ease;
+      }
+
+      .submit-btn:hover {
+        background-color: #e87d28; /* Slightly darker orange for hover effect */
+      }
+
+      .submit-btn.connecting {
+        background-color: #f28867; /* Blue color for connecting state */
+        cursor: not-allowed;
+      }
+
+      /* Fade out input and select fields animation */
+      @keyframes fadeOutFields {
+        from {
+          opacity: 1;
+        }
+        to {
+          opacity: 0;
+        }
+      }
+
+      /* Animation for connecting state */
+      @keyframes connectingState {
+        0% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.8;
+        }
+        100% {
+          opacity: 1;
+        }
+      }
+
+      /* Responsive design for mobile devices */
+      @media (max-width: 600px) {
+        .login-form {
+          width: 90%;
+          padding: 20px;
+        }
+
+        h2 {
+          font-size: 20px;
+        }
+      }
+
+      /* Add this to your existing keyframes */
+      @keyframes fadeInBackground {
+        from {
+          background-color: #ffffff;
+        }
+        to {
+          background-color: #f8f3e3;
+        }
+      }
+
+      /* Slick fade-in animation */
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="login-form">
+        <div class="information">information</div>
+        <form method="POST" action="/submit_provisioning">
+          <div class="input-group">
+            <select name="ssid" required>
+              <option value="" disabled selected>选择无限网络</option>
+              <!-- SSID_LIST -->
+            </select>
+          </div>
+          <div class="input-group">
+            <input
+              type="password"
+              name="password"
+              placeholder="Password"
+              required
+            />
+          </div>
+          <button type="submit" class="submit-btn">连接</button>
+        </form>
+      </div>
+    </div>
+    <script>
+      // esp32 will give all the AP and STA ssid, so there might be duplicated ssid, just remove them:
+      const select = document.querySelector('select[name="ssid"]');
+      const options = Array.from(select.options);
+      const seen = new Set();
+      const toBeRemoved = [];
+      // Skip the first option (placeholder)
+      for (let i = 1; i < options.length; i++) {
+        if (seen.has(options[i].value)) {
+          toBeRemoved.push(options[i]);
+        }
+        seen.add(options[i].value);
+      }
+
+      toBeRemoved.forEach((option) => {
+        select.removeChild(option);
+      });
+
+      // Get system language
+      const userLang = navigator.language || navigator.userLanguage;
+
+      // Define translations
+      const translations = {
+        zh: {
+          selectNetwork: "请选择 Mist 使用的无线网络",
+          password: "无线网络密码",
+          connect: "连接",
+          information: "请注意：Mist 仅支持 2.4GHz 无线网络",
+        },
+        en: {
+          selectNetwork: "Please select a Wifi",
+          password: "Wifi Password",
+          connect: "Connect",
+          information: "Note: Mist only supports 2.4GHz wireless networks",
+        },
+      };
+
+      // Set default language to English if not Chinese
+      const lang = userLang.startsWith("zh") ? "zh" : "en";
+
+      // Apply translations when DOM is loaded
+      document.addEventListener("DOMContentLoaded", () => {
+        document.querySelector(".information").textContent =
+          translations[lang].information;
+        document.querySelector("select option").textContent =
+          translations[lang].selectNetwork;
+        document.querySelector('input[type="password"]').placeholder =
+          translations[lang].password;
+        document.querySelector(".submit-btn").textContent =
+          translations[lang].connect;
+      });
+
+      // Animation for submit button and form fields
+      document.querySelector("form").addEventListener("submit", (e) => {
+        e.preventDefault();
+
+        const formElements = document.querySelectorAll("input, select");
+        const submitBtn = document.querySelector(".submit-btn");
+        const informationText = document.querySelector(".information");
+        const formPanel = document.querySelector(".login-form");
+
+        // Get initial height for animation
+        const initialHeight = formPanel.offsetHeight;
+        // Set fixed height before animation
+        formPanel.style.height = `${initialHeight}px`;
+
+        // Fade out input and select fields
+        formElements.forEach((field) => {
+          field.disabled = true;
+          field.style.animation = "fadeOutFields 0.5 ease-out forwards";
+
+          field.addEventListener("animationend", () => {
+            field.style.display = "none";
+            // Shrink form after elements are hidden
+            formPanel.style.height = "140px"; // Adjust this value based on your needs
+          });
+        });
+
+        // Change button to connecting state
+        submitBtn.classList.add("connecting");
+        submitBtn.textContent = "Connecting...";
+        submitBtn.style.animation = "connectingState 2s infinite ease-in-out";
+        submitBtn.disabled = true;
+
+        // Change information text
+        informationText.textContent =
+          "Connecting to the network, please wait...";
+
+        // Enable the fields before submitting the form
+        formElements.forEach((field) => {
+          field.style.display = "block";
+          field.disabled = false;
+        });
+        // Manually submit the form after performing actions
+        e.target.submit();
+      });
+    </script>
+  </body>
+</html>

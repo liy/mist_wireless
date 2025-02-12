@@ -12,12 +12,12 @@
 #include "esp_http_server.h"
 #include "dns_server.h" 
 
-#define MAX_RETRIES    5
-
+#define MAX_RETRIES    1
+#define DEFAULT_SCAN_LIST_SIZE 100
 #define WIFI_AP_SSID "Mist"
 
-extern const char root_start[] asm("_binary_root_html_start");
-extern const char root_end[] asm("_binary_root_html_end");
+extern const char index_html_start[] asm("_binary_index_html_start");
+extern const char index_html_end[] asm("_binary_index_html_end");
 
 static const char *TAG = "Wireless";
 
@@ -30,17 +30,119 @@ static int s_retry_count = 0;
 
 static bool wifi_connected = false;
 
-// HTTP GET Handler
-static esp_err_t root_get_handler(httpd_req_t *req)
+// This function is called when the root page is requested
+// It scan the wifi ssid and list them in the html page
+static esp_err_t index_get_handler(httpd_req_t *req)
 {
-    const uint32_t root_len = root_end - root_start;
+    // Perform Wi-Fi scan
+    uint16_t number = DEFAULT_SCAN_LIST_SIZE;
+    wifi_ap_record_t *ap_info = malloc(number * sizeof(wifi_ap_record_t));
+    if (!ap_info) {
+        ESP_LOGE(TAG, "Failed to allocate memory for AP info");
+        return ESP_ERR_NO_MEM;
+    }
 
-    ESP_LOGI(TAG, "Serve root");
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, root_start, root_len);
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0, // Use channel_bitmap instead
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time = {
+            .active = {
+                .min = 100,
+                .max = 300
+            }
+        },
+        // Represents 2.4 GHz channels
+        .channel_bitmap = {
+            .ghz_2_channels = 0x3FFF 
+        }
+    };
+    ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, true));
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&number));
+    ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&number, ap_info));
+    ESP_LOGI(TAG, "Total APs scanned = %u", number);
+
+    // Generate SSID list HTML
+    size_t ssid_list_html_size = 2048;
+    char *ssid_list_html = malloc(ssid_list_html_size);
+    if (!ssid_list_html) {
+        ESP_LOGE(TAG, "Failed to allocate memory for SSID list HTML");
+        free(ap_info);
+        return ESP_ERR_NO_MEM;
+    }
+    strcpy(ssid_list_html, "");
+    for (int i = 0; i < number; i++) {
+        size_t ssid_len = strlen((char *)ap_info[i].ssid);
+        if (strlen(ssid_list_html) + ssid_len + 50 > ssid_list_html_size) {
+            ssid_list_html_size *= 2;
+            ssid_list_html = realloc(ssid_list_html, ssid_list_html_size);
+            if (!ssid_list_html) {
+                ESP_LOGE(TAG, "Failed to reallocate memory for SSID list HTML");
+                free(ap_info);
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        strcat(ssid_list_html, "<option value=\"");
+        strcat(ssid_list_html, (char *)ap_info[i].ssid);
+        strcat(ssid_list_html, "\">");
+        strcat(ssid_list_html, (char *)ap_info[i].ssid);
+        strcat(ssid_list_html, "</option>");
+    }
+    
+    // Read the template HTML into a buffer
+    const uint32_t index_len = index_html_end - index_html_start;
+    char *index_html = malloc(index_len + 1);
+    if (!index_html) {
+        ESP_LOGE(TAG, "Failed to allocate memory for root HTML");
+        free(ssid_list_html);
+        free(ap_info);
+        return ESP_ERR_NO_MEM;
+    }
+    memcpy(index_html, index_html_start, index_len);
+    index_html[index_len] = '\0';
+
+    // Find the SSID_LIST placeholder and replace it
+    char *insert_pos = strstr(index_html, "<!-- SSID_LIST -->");
+    if (insert_pos) {
+        // Calculate required buffer size
+        size_t prefix_len = insert_pos - index_html;
+        size_t suffix_len = strlen(insert_pos + strlen("<!-- SSID_LIST -->"));
+        size_t total_len = prefix_len + strlen(ssid_list_html) + suffix_len + 1;
+        
+        // Create new buffer with the exact size needed
+        char *new_html = malloc(total_len);
+        if (!new_html) {
+            ESP_LOGE(TAG, "Failed to allocate memory for new HTML");
+            free(index_html);
+            free(ssid_list_html);
+            free(ap_info);
+            return ESP_ERR_NO_MEM;
+        }
+
+        // Copy parts into new buffer
+        strncpy(new_html, index_html, prefix_len);
+        strcpy(new_html + prefix_len, ssid_list_html);
+        strcat(new_html, insert_pos + strlen("<!-- SSID_LIST -->"));
+
+        // Send the response
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, new_html, strlen(new_html));
+
+        free(new_html);
+    } else {
+        // If placeholder not found, send original HTML
+        httpd_resp_send(req, index_html, strlen(index_html));
+    }
+
+    free(ssid_list_html);
+    free(index_html);
+    free(ap_info);
 
     return ESP_OK;
 }
+
 
 static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "POST request received");
@@ -83,8 +185,6 @@ static esp_err_t submit_provisioning_post_handler(httpd_req_t *req) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_config));
     ESP_ERROR_CHECK(esp_wifi_connect());
 
-    httpd_resp_send(req, "WiFi connection succeeds! This page is going automatically close in a few seconds...", HTTPD_RESP_USE_STRLEN);
-
     return ESP_OK;
 }
 
@@ -102,10 +202,10 @@ esp_err_t http_404_error_handler(httpd_req_t *req, httpd_err_code_t err)
     return ESP_OK;
 }
 
-static const httpd_uri_t root = {
+static const httpd_uri_t index_uri = {
     .uri = "/",
     .method = HTTP_GET,
-    .handler = root_get_handler
+    .handler = index_get_handler
 };
 
 static httpd_uri_t submit_uri = {
@@ -126,7 +226,7 @@ static httpd_handle_t start_webserver(void)
     if (httpd_start(&server, &config) == ESP_OK) {
         // Set URI handlers
         ESP_LOGI(TAG, "Registering URI handlers");
-        httpd_register_uri_handler(server, &root);
+        httpd_register_uri_handler(server, &index_uri);
         httpd_register_uri_handler(server, &submit_uri);
         httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, http_404_error_handler);
     }
